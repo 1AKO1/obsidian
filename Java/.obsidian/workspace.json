@@ -6,6 +6,7 @@
       {
         "id": "6bc366a9f868b611",
         "type": "tabs",
+        "dimension": 85.40462427745665,
         "children": [
           {
             "id": "39813548f6b4c0a6",
@@ -13,29 +14,37 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "欢迎.md",
+                "file": "JVM/深入拆解JVM虚拟机.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "欢迎"
-            }
+              "title": "深入拆解JVM虚拟机"
+            },
+            "group": "2e00753ec2eb0c09"
           }
         ]
       },
       {
-        "id": "95877d491da79e7f",
+        "id": "5e40eecbdb18aa28",
         "type": "tabs",
+        "dimension": 14.595375722543352,
         "children": [
           {
-            "id": "e5644133a088435b",
+            "id": "9a61cfc451311f6e",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "关系图谱"
-            }
+              "type": "outline",
+              "state": {
+                "file": "JVM/深入拆解JVM虚拟机.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "深入拆解JVM虚拟机 的大纲"
+            },
+            "group": "2e00753ec2eb0c09"
           }
         ]
       }
@@ -201,6 +210,11 @@
   },
   "active": "39813548f6b4c0a6",
   "lastOpenFiles": [
-    "欢迎.md"
+    "JVM/attachments/Pasted image 20260215121157.png",
+    "JVM/attachments/Pasted image 20260215110638.png",
+    "JVM/深入拆解JVM虚拟机.md",
+    "JVM/attachments",
+    "欢迎.md",
+    "JVM"
   ]
 }
