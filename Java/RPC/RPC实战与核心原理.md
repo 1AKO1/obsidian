@@ -2,7 +2,8 @@
 **为什么学**：RPC是解决分布式系统通信的利器，可以屏蔽底层的网络传输细节，让程序员专注于逻辑本身。不仅仅是用于微服务。
 **如何学**：先了解基本的原理（核心流程、协议、序列化、网络通信、动态代理、实战），再学习RPC的框架（服务注册与发现、健康检测、路由策略、负载均衡、异常重试、优雅启动与关闭、熔断与限流、流量隔离），最后聊一些高级内容。
 
-
+**MTThrift的一些文档**：https://km.sankuai.com/collabpage/2366230542
+TODO：看完之后学习 https://km.sankuai.com/page/381359483 、https://km.sankuai.com/page/163246448 每日一粒
 # 基础篇
 ## 核心原理
 **什么是PRC**
@@ -121,6 +122,124 @@ PS：零拷贝未必可以减少内核态和用户态的切换次数
 Netty的零拷贝主要用于解决用户空间内部的数据拷贝，比如拆包发送后的包合并。
 
 Netty也支持用户空间和内核空间之间的零拷贝，针对上面的两个实现方法也都有具体落地，这里没展开～
+
+
+## 动态代理
+在调用RPC方法的时候，我们感觉和使用和本地方一样便利，因为这个过程用到了动态代理。
+我们实际使用只依赖方法的接口，Spring为我们注册了代理Bean，使用动态代理在内部帮我们完成了远程服务的注册和发现等能力。
+![[Pasted image 20260222195607.png]]
+
+**实现原理（以JDK自带的为例）**
+
+``` java
+/**
+ * 要代理的接口
+ */
+public interface UserService {  
+    String sayHello();  
+}
+
+/**
+ * 真实调用对象
+ */
+public class UserServiceImpl implements UserService {  
+    @Override  
+    public String sayHello() {  
+        return "你好";  
+    }  
+}
+
+/**
+ * JDK代理类生成
+ */
+public class JDKProxy implements InvocationHandler {
+    private Object target;
+
+    JDKProxy(Object target) {
+        this.target = target;
+    }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] paramValues) {
+	    // 执行前插入逻辑
+         Object obj = ((RealHello)target).invoke();
+        // 执行后插入逻辑
+        return obj;
+    }
+}
+
+/**
+ * 测试例子
+ */
+public class TestProxy {
+
+	public static void main(String[] args){  
+	    // 构建代理器  
+	    UserServiceProxy proxy = new UserServiceProxy(new UserServiceImpl());  
+	    // 把生成的代理类保存到文件  
+	    System.setProperty("sun.misc.ProxyGenerator.saveGeneratedFiles","true"); 
+	    // 生成代理类  
+	    UserService test = (UserService) Proxy.newProxyInstance(proxy.getClass().getClassLoader(), new Class[]{UserService.class}, proxy);  
+	    // 方法调用  
+	    System.out.println(test.sayHello());  
+}
+}
+```
+PS：
+- **InvocationHandler**：Java 动态代理（`java.lang.reflect.Proxy`）的核心接口，用于在代理对象的方法被调用时插入自定义逻辑。使用方法和代码里的一样，可以在前后插入各种各样的逻辑
+- **Proxy.newProxyInstance**:
+![[Pasted image 20260222211310.png]]
+``` java
+  public static Object newProxyInstance(ClassLoader loader,  
+                                      Class<?>[] interfaces,  
+                                      InvocationHandler h) throws IllegalArgumentException {
+    Objects.requireNonNull(h);  
+  
+    final Class<?>[] intfs = interfaces.clone();  
+    final SecurityManager sm = System.getSecurityManager();  
+    if (sm != null) {  
+        checkProxyAccess(Reflection.getCallerClass(), loader, intfs);  
+    }  
+  
+    /*  
+     * Look up or generate the designated proxy class.     */    
+       Class<?> cl = getProxyClass0(loader, intfs);  
+    /*  
+     * Invoke its constructor with the designated invocation handler.     */   
+    try {
+       if (sm != null) {
+	       checkNewProxyPermission(Reflection.getCallerClass(), cl);  
+	    }  
+	    final Constructor<?> cons = cl.getConstructor(constructorParams);  
+	    final InvocationHandler ih = h;  
+	    if (!Modifier.isPublic(cl.getModifiers())) {  
+            AccessController.doPrivileged(new PrivilegedAction<Void>() {
+	            public Void run() {  
+	                cons.setAccessible(true);  
+	                return null;  
+	            }  
+	        });  
+	    }  
+	    return cons.newInstance(new Object[]{h});  
+	} catch (IllegalAccessException|InstantiationException e) {  
+        throw new InternalError(e.toString(), e);  
+    } catch (InvocationTargetException e) {  
+	    Throwable t = e.getCause();  
+	    if (t instanceof RuntimeException) {  
+	        throw (RuntimeException) t;  
+        } else {  
+	        throw new InternalError(t.toString(), t);  
+	    }  
+	} catch (NoSuchMethodException e) {  
+        throw new InternalError(e.toString(), e);  
+	}  
+}
+```
+
+**动态代理选型角度**：
+- **生成的字节码越小，运行所占资源就越小**：代理类是在运行中生成的，代理框架生成代理类的速度、生成代理类的字节码大小等等，都会影响到其性能。
+- **生成的代理类的执行效率**：生成的代理类，是用于接口方法请求拦截的，所以每次调用接口方法的时候，都会执行生成的代理类，这个效率也很重要。
+- **是否好用、易用**：API设计是否好理解、社区活跃度、还有就是依赖复杂度等等。
 
 # 进阶篇
 
