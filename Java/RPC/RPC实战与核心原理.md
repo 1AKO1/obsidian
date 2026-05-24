@@ -612,4 +612,249 @@ Mtrace，一次调用会有Trace信息贯穿上下文。
 
 
 ## 时钟轮
-https://km.sankuai.com/page/461521143
+### 什么是时钟轮
+一种特殊的环形数组，通过槽位 + 指针定时切换槽位，可以执行定时任务。
+
+这是一个多层时间轮代码
+```java
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+// 定时任务
+class TimerTask {
+    Runnable runnable;
+    long expireTimeMs; // 到期时间戳
+
+    public TimerTask(Runnable runnable, long expireTimeMs) {
+        this.runnable = runnable;
+        this.expireTimeMs = expireTimeMs;
+    }
+}
+
+// 多层时间轮
+class MultiLevelTimeWheel {
+    private final int wheelSize;
+    private final long tickMs;
+    private final List<Queue<TimerTask>> wheel;
+    private final AtomicInteger currentTick = new AtomicInteger(0);
+    private final ScheduledExecutorService scheduler;
+    private final MultiLevelTimeWheel higherLevel; // 上一层时间轮
+    private final long startMs;
+
+    public MultiLevelTimeWheel(int wheelSize, long tickMs, MultiLevelTimeWheel higherLevel) {
+        this.wheelSize = wheelSize;
+        this.tickMs = tickMs;
+        this.higherLevel = higherLevel;
+        this.wheel = new ArrayList<>(wheelSize);
+        for (int i = 0; i < wheelSize; i++) {
+            wheel.add(new ConcurrentLinkedQueue<>());
+        }
+        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+        this.startMs = System.currentTimeMillis();
+    }
+
+    public void start() {
+        scheduler.scheduleAtFixedRate(this::tick, tickMs, tickMs, TimeUnit.MILLISECONDS);
+        if (higherLevel != null) higherLevel.start();
+    }
+
+    public void stop() {
+        scheduler.shutdown();
+        if (higherLevel != null) higherLevel.stop();
+    }
+
+    // 添加任务
+    public void addTask(Runnable task, long delayMs) {
+        long expireTimeMs = System.currentTimeMillis() + delayMs;
+        addTask(new TimerTask(task, expireTimeMs));
+    }
+
+    private void addTask(TimerTask timerTask) {
+        long delayMs = timerTask.expireTimeMs - System.currentTimeMillis();
+        if (delayMs < 0) delayMs = 0;
+        long maxDelay = wheelSize * tickMs;
+        if (delayMs < maxDelay) {
+            // 本层可管理，放入对应槽位
+            int ticks = (int)(delayMs / tickMs);
+            int slot = (currentTick.get() + ticks) % wheelSize;
+            wheel.get(slot).add(timerTask);
+        } else if (higherLevel != null) {
+            // 超本层，递归放到高层
+            higherLevel.addTask(timerTask);
+        } else {
+            // 超最大范围，放到最后一个槽
+            wheel.get(wheelSize - 1).add(timerTask);
+        }
+    }
+
+    private void tick() {
+        int tick = currentTick.getAndIncrement() % wheelSize;
+        Queue<TimerTask> tasks = wheel.get(tick);
+        Iterator<TimerTask> iter = tasks.iterator();
+        while (iter.hasNext()) {
+            TimerTask t = iter.next();
+            long now = System.currentTimeMillis();
+            if (t.expireTimeMs <= now) {
+                try {
+                    t.runnable.run();
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                iter.remove();
+            } else {
+                // 未到期，重新加入到本层或高层
+                iter.remove();
+                addTask(t);
+            }
+        }
+    }
+
+    // 示例main方法
+    public static void main(String[] args) throws InterruptedException {
+        // 第二层：60槽，每tick 1秒，最大范围60秒
+        MultiLevelTimeWheel level2 = new MultiLevelTimeWheel(60, 1000, null);
+        // 第一层：60槽，每tick 60秒，最大范围3600秒（1小时），管理更长任务
+        MultiLevelTimeWheel level1 = new MultiLevelTimeWheel(60, 60_000, level2);
+
+        level1.start();
+
+        // 5秒后执行
+        level1.addTask(() -> System.out.println("任务1执行，5秒后"), 5000);
+        // 70秒后执行（会先放到level1，再转到level2）
+        level1.addTask(() -> System.out.println("任务2执行，70秒后"), 70_000);
+        // 1小时后执行（会一直在level1）
+        level1.addTask(() -> System.out.println("任务3执行，1小时后"), 3_600_000);
+
+        Thread.sleep(75_000);
+        level1.stop();
+    }
+}
+```
+
+
+### 为什么需要时钟轮
+最low的定时任务，就是sleep，期间会一直占用CPU进行处理。很浪费CPU性能。
+时钟轮就可以解决这个问题，等到你了再去执行，没到你就不用管。
+
+### 时钟轮在RPC的应用
+- 定时任务
+- 快速部署启动，定时1min没启动好就算失败
+- 心跳机制，10S跳一次，执行一次后创建一个新的再丢进去
+
+**注意**，时钟轮存在的问题
+- 时间槽位的单位时间越短，时间轮触发任务的时间就越精确：例如时间槽位的单位时间是10毫秒，那么执行定时任务的时间误差就在10毫秒内，如果是100毫秒，那么误差就在100毫秒内。
+
+- 时间轮的槽位越多，那么一个任务被重复扫描的概率就越小，因为只有在多层时钟轮中的任务才会被重复扫描。比如一个时间轮的槽位有1000个，一个槽位的单位时间是10毫秒，那么下一层时间轮的一个槽位的单位时间就是10秒，超过10秒的定时任务会被放到下一层时间轮中，也就是只有超过10秒的定时任务会被扫描遍历两次，但如果槽位是10个，那么超过100毫秒的任务，就会被扫描遍历两次
+	- 这个我理解就是，重复扫描的话可能也会占用CPU吧？
+
+
+
+## 流量回放
+**什么是流量回放**：录制请求request + response，用来验证新逻辑是否符合预期，一般比QA的用例覆盖的更全面。
+
+**如何录制流量**：拦截RPC请求，异步记录下来就行了。后面可以再直接模拟调用进行回放。
+
+
+## 动态分组
+**什么是动态分组**：感觉就是弹性扩容，划分好的分组预留一定机器冗余后，在高峰期仍然有可能会不够用，可能会影响业务稳定性。此时可以通过机器池 + 动态划分分组的形式，快速支持到各个业务分组。
+
+不过这里说的动态分组，指的是一类服务的分组的冗余机器，可以临时划分到不同LiteSet，不用部署。
+如果是纯公共池机器的话，我理解还是要重新部署发布的。
+
+
+## 泛化调用：没有接口时也可以发起RPC调用
+RPC的Server和Client都是通过动态代理去交互请求的，实际上我们只需要能直接给Server发动态代理处理好的消息就行了，里面需要按照格式发送下图中的相关信息。
+![[Pasted image 20260522004419.png]]
+
+
+RPC框架一般都支持GenericService，内部会通过反射自动帮创建对应的方法名，如果没有的话是调不通的
+此外，需要指定appkey，才能正确路由到目标的服务分组
+这里也有讲解 
+https://cloud.tencent.com/developer/article/2364374
+
+
+
+## RPC支持多协议
+
+### 为什么要支持多协议
+RPC技术有很多，我们的技术栈可能需要不断迭代来适配新的需求，在迭代过程中可能会遇到需要切换协议的情况（但我感觉大概率不会）
+
+
+
+
+# RPC框架实例详解
+## 服务端创建流程
+1. 根据ProviderConfig的配置信息生成registryUrl（注册中心URL对象）与serviceUrl（服务URL对象）；
+2. 根据registryUrl，调用Registry插件，创建Registry对象，Registry对象为注册中心对象，与注册中心进行交互；
+3. 调用Registry对象的open方法，开启注册中心对象，也就是与注册中心建立连接；
+4. 调用Registry对象的subscribe方法，订阅接口的配置信息与全局配置信息；
+5. 调用InvokerManager，创建Exporter对象；
+6. InvokerManager返回Exporter对象。
+![[Pasted image 20260524230211.png]]
+
+
+## 服务端开启流程
+1. 调用Exporter对象的open方法，开启服务端；
+2. Exporter对象调用接口预热插件，进行接口预热；
+3. Exporter对象调用传输层中的EndpointFactroy插件，创建一个Server对象，一个Server对象就代表一个端口了；
+4. 调用Server对象的open方法，开启端口，端口开启之后，服务端就可以提供远程服务了；
+5. Exporter对象调用Registry对象的register方法，将这个调用端节点注册到注册中心中。
+![[Pasted image 20260524230255.png]]
+
+
+## 调用端启动流程
+1. 根据ConsumerConfig的配置信息生成registryUrl（注册中心URL对象）与serviceUrl（服务URL对象）；
+2. 根据registryUrl，调用Registry插件，创建Registry对象，Registry对象为注册中心对象，与注册中心进行交互；
+3. 创建动态代理对象；
+4. 调用Registry对象的Open方法，开启注册中心对象；
+5. 调用Registry对象subscribe方法，订阅接口的配置信息与全局配置信息；
+6. 调用InvokeManager的refer方法，用来创建Refer对象；
+7. InvokeManager在创建Refer对象之前会先创建Cluster对象，Cluser对象是集群层的核心对象，Cluster会维护该调用端与服务端节点的连接状态；
+8. InvokeManager创建Refer对象；
+9. Refer对象初始化，其中主要包括创建路由策略、消息分发策略、创建负载均衡、调用链、添加eventbus事件监听等等；
+10. ConsumerConfig调用Refer的open方法，开启调用端；
+11. Refer对象调用Cluster对象的open方法，开启集群；
+12. Cluster对象调用Registry对象的subcribe方法，订阅服务端节点变化，收到服务端节点变化时，Cluster会调用传输层EndpointFactroy插件，创建Client对象，与这些服务节点建立连接，Cluster会维护这些连接；
+13. ConsumerConfig调用Refer对象封装到ConsumerInvokerHandler中，将ConsumerInvokerHandler对象注入给动态代理对象。
+![[Pasted image 20260524230323.png]]
+
+
+## RPC调用流程
+
+### 调用端发送流程
+
+![[Pasted image 20260524230354.png]]
+1. 动态代理对象调用ConsumerInvokerHandler对象的Invoke方法；
+2. ConsumerInvokerHandler对象生成请求消息对象；
+3. ConsumerInvokerHandler对象调用Refer对象的Invoke方法；
+4. Refer对象对请求消息对象进行处理，如设置接口信息、分组信息等等；
+5. Refer对象调用消息透传插件，处理透传信息，其中就包括隐式参数信息；
+6. Refer对象调用FilterChain对象的Invoker方法，执行调用链；
+7. FilterChain对象调用每个Filter；
+8. Refer对象的distribute方法作为最后一个Filter，被调用链最后一个执行。
+9. 调用NodeSelecter对象的select方法，NodeSelecter是集群层的路由规则节点选择器，其select方法用来选择出符合路由规则的服务节点；
+10. 调用Route对象的route方法，Route对象为路由分发器，也是集群层中的对象，默认为路由分发策略为Failover，即请求失败后可以重试请求，这里你可以回顾下[[第 12 讲]](https://time.geekbang.org/column/article/211261)，在这一讲的思考题中我就问过异常重试发送在RPC调用中的哪个环节，其实就在此环节；
+11. Route对象调用LoadBalance对象的select方法，通过负载均衡选择一个节点；
+12. Route对象回调Refer对象的invokeRemote方法；
+13. Refer对象的invokeRemote方法调用传输层中Client对象，向服务端节点发送消息。
+
+### 服务端接收流程
+1. 传输层接收到请求，触发协议适配器ProtocolAdapter；
+2. ProtocolAdapter对象遍历Protocol插件的实现类，匹配协议；
+3. 匹配协议之后，根据Protocol对象，传输层的Server对象绑定该协议的编解码器（Codec对象）、Channel处理链（ChainChannelHandler对象）；
+4. 对接收的消息进行解码与反序列化；
+5. 执行Channel处理链；
+6. 在业务线程池中调用消息处理链（MessageHandle插件）；
+7. 调用BizReqHandle对象的handle方法，处理请求消息；
+8. BizReqHandle对象调用restore方法，根据连接Session信息，处理请求消息数据，并根据请求的接口名、分组名与方法名，获取Exporter对象；
+9. 调用Exporter对象的invoke方法，Exporter对象返回CompletableFuture对象；
+10. Exporter对象调用FilterChain的invoke方法；
+11. FilterChain执行所有Filter对象；
+12. Exporter对象的invokeMethod方法作为最后一个Filter，最后被调用；
+13. Exporter对象的invokeMethod方法处理请求上下文，执行反射；
+14. Exporter对象将执行反射之后得到的请求结果异步通知给BizReqHandle对象；
+15. BizReqHandle调用传输层的Channel对象，发送响应结果；
+16. 传输层对响应消息进行协议转换、序列化、编码，最后通过网络传输响应给调用端。
+![[Pasted image 20260524230413.png]]
+
